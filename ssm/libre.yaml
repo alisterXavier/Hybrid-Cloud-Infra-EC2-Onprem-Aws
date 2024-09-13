@@ -1,0 +1,235 @@
+---
+schemaVersion: "2.2"
+description: "SSM document for VPN and DNS setup"
+parameters:
+  vpnConnectionId:
+    type: String
+    description: "VPN Connection ID"
+  vpcRegion:
+    type: String
+    description: "AWS Region"
+  onPremVpcCidr:
+    type: String
+    description: "Client VPC CIDR"
+  awsVpcCidr:
+    type: String
+    description: "App VPC CIDR"
+  domain:
+    type: String
+  r53ResolverIp1:
+    type: String
+  r53ResolverIp2:
+    type: String
+  vpcRouter:
+    type: String
+mainSteps:
+  - action: "aws:runShellScript"
+    name: "SetupVPNandDNS"
+    inputs:
+      runCommand:
+        - |
+          #!/bin/bash
+
+          set -e  # Exit immediately if a command exits with a non-zero status.
+
+          # Set up logging
+          LOG_FILE="/var/log/VPN-DNS-setup.log"   
+          exec > >(tee -a "$LOG_FILE") 2>&1
+
+          log() {
+              echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+          }
+
+          log "Starting VPN and DNS setup script"
+
+          # Install jq
+          log "Checking for jq installation"
+          if ! command -v jq &> /dev/null; then
+              log "jq not found. Installing jq..."
+              
+              # Enable EPEL repository using Amazon Linux Extras
+              sudo amazon-linux-extras install epel -y
+              
+              # Install jq
+              sudo yum install -y jq
+              
+              if ! command -v jq &> /dev/null; then
+                  log "Failed to install jq using yum. Attempting to install using alternative method..."
+                  sudo yum install -y wget
+                  wget -O jq https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64
+                  sudo mv jq /usr/bin/
+                  sudo chmod +x /usr/bin/jq
+              fi 
+          fi
+
+          # Verify jq installation
+          if command -v jq &> /dev/null; then
+              log "jq has been successfully installed"
+          else
+              log "Failed to install jq. Exiting script."
+              exit 1
+          fi
+
+          # Install xmllint if not present
+          log "Checking for xmllint installation"
+          if ! command -v xmllint &> /dev/null; then
+              log "xmllint not found. Installing libxml2..."
+              sudo yum install -y libxml2
+          fi
+
+          # Set your VPN connection ID and AWS region
+          VPN_CONNECTION_ID="{{ vpnConnectionId }}"
+          AWS_REGION="{{ vpcRegion }}"
+          ON_PREM_VPC_CIDR="{{ onPremVpcCidr }}"
+          AWS_VPC_CIDR="{{ awsVpcCidr }}"
+          DOMAIN="{{ domain }}"
+          R53_RESOLVER_IP1="{{ r53ResolverIp1 }}"
+          R53_RESOLVER_IP2="{{ r53ResolverIp2 }}"
+          VPC_ROUTER="{{ vpcRouter }}"
+
+          log "VPN Connection ID: $VPN_CONNECTION_ID"
+          log "AWS Region: $AWS_REGION"
+          log "On Prem VPC CIDR: $ON_PREM_VPC_CIDR"
+          log "Aws VPC CIDR: $AWS_VPC_CIDR"
+
+          # Get VPN connection details
+          log "Fetching VPN connection details"
+          vpn_connection=$(aws ec2 describe-vpn-connections --vpn-connection-ids $VPN_CONNECTION_ID --region $AWS_REGION --query 'VpnConnections[0]')
+
+          # Extract the CustomerGatewayConfiguration
+          customer_gateway_config=$(echo $vpn_connection | jq -r '.CustomerGatewayConfiguration')
+
+          # Extract the PSK using xmllint
+          psk_tunnel1=$(echo "$vpn_connection" | jq -r '.Options.TunnelOptions[0].PreSharedKey')
+          # psk_tunnel2=$(echo "$vpn_connection" | jq -r '.Options.TunnelOptions[1].PreSharedKey')
+
+          # Extract the VPN tunnel IP (AWS side)
+          AWS_VPN_TUNNEL_IP=$(echo $vpn_connection | jq -r '.VgwTelemetry[0].OutsideIpAddress')
+
+          # Extract the Customer Gateway IP
+          CGW_IP=$(echo $customer_gateway_config | xmllint --xpath "string(//customer_gateway/tunnel_outside_address/ip_address)" -)
+
+          # Print the results
+          log "AWS VPN Tunnel IP: $AWS_VPN_TUNNEL_IP"
+          log "Customer Gateway IP: $CGW_IP"
+          log "VPN Tunnel PSK: [REDACTED]"
+
+          # Update the system
+          log "Updating system packages"
+          sudo yum update -y
+
+          # Install iptables-services
+          log "Installing iptables-services"
+          sudo yum install iptables-services -y || {
+              log "iptables-services installation failed. Cleaning YUM cache and retrying..."
+              sudo yum clean all
+              sudo yum makecache
+              sudo yum install iptables-services -y
+          }
+
+          # Enable IP forwarding
+          log "Enabling IP forwarding"
+          echo "net.ipv4.ip_forward = 1" | sudo tee -a /etc/sysctl.conf
+          sudo sysctl -p
+
+          # Configure NAT using iptables rules
+          log "Configuring NAT for CIDR: $ON_PREM_VPC_CIDR"
+          sudo iptables -t nat -A POSTROUTING -s $ON_PREM_VPC_CIDR -j MASQUERADE || {
+              log "Failed to add MASQUERADE rule. Please check your iptables configuration."
+              exit 1
+          }
+
+          # Save the iptables rules
+          log "Saving iptables rules"
+          sudo service iptables save
+
+          # Install Libreswan
+          log "Installing Libreswan"
+          sudo yum install libreswan -y || {
+              log "Libreswan installation failed. Cleaning YUM cache and retrying..."
+              sudo yum clean all
+              sudo yum makecache
+              sudo yum install libreswan -y
+          }
+
+          # Configure /etc/ipsec.conf
+          log "Configuring /etc/ipsec.conf"
+          sudo sed -i 's/^#include \/etc\/ipsec.d\/\*.conf$/include \/etc\/ipsec.d\/\*.conf/' /etc/ipsec.conf
+
+          # Create /etc/ipsec.d/aws.conf
+          log "Creating /etc/ipsec.d/aws.conf"
+          cat <<EOL | sudo tee /etc/ipsec.d/aws.conf
+          conn Tunnel1
+           authby=secret
+           auto=start
+           left=%defaultroute
+           leftid=$CGW_IP
+           right=$AWS_VPN_TUNNEL_IP
+           type=tunnel
+           ikelifetime=8h
+           keylife=1h
+           phase2alg=aes_gcm
+           ike=aes256-sha1
+           keyingtries=%forever
+           keyexchange=ike
+           leftsubnet=$ON_PREM_VPC_CIDR
+           rightsubnet=$AWS_VPC_CIDR
+           dpddelay=10
+           dpdtimeout=30
+           dpdaction=restart_by_peer
+           encapsulation=yes
+           logfile=/var/log/pluto.log
+           plutodebug=all
+          EOL
+
+          # Create /etc/ipsec.d/aws.secrets
+          log "Creating /etc/ipsec.d/aws.secrets"
+          echo "$CGW_IP $AWS_VPN_TUNNEL_IP : PSK \"$psk_tunnel1\"" | sudo tee /etc/ipsec.d/aws.secrets
+
+          # Start ipsec service
+          log "Starting ipsec service"
+          sudo systemctl start ipsec.service
+
+          # Install dnsmasq
+          log "Installing dnsmasq"
+          sudo yum install -y dnsmasq
+
+          # Configure dnsmasq
+          log "Configuring dnsmasq"
+          sudo tee /etc/dnsmasq.conf > /dev/null <<EOF
+          interface=*
+          no-resolv
+          no-poll
+          server=/test.$DOMAIN/$R53_RESOLVER_IP1
+          server=/test.$DOMAIN/$R53_RESOLVER_IP2
+          listen-address=0.0.0.0
+          max-ttl=300
+          min-cache-ttl=300
+          log-queries
+          log-facility=/var/log/dnsmasq.log
+          cache-size=1000
+          dns-forward-max=150
+          strict-order
+          local=/$DOMAIN/
+          server=$VPC_ROUTER
+          EOF
+
+          # Start dnsmasq
+          log "Starting dnsmasq service"
+          sudo systemctl start dnsmasq
+          sudo systemctl enable dnsmasq
+
+          # Flush DNS cache
+          log "Flushing DNS cache"
+          if command -v systemd-resolve &> /dev/null; then
+              sudo systemd-resolve --flush-caches
+          elif [ -f /etc/init.d/nscd ]; then
+              sudo /etc/init.d/nscd restart
+          fi
+
+          # Restart IPSec and dnsmasq
+          log "Restarting IPSec and dnsmasq services"
+          sudo systemctl restart ipsec
+          sudo systemctl restart dnsmasq
+
+          log "VPN setup completed"
