@@ -1,11 +1,3 @@
-variable "ACCESS_KEY" {
-  type = string
-}
-
-variable "SECRET_ACCESS_KEY" {
-  type = string
-}
-
 locals {
   account_id      = data.aws_caller_identity.current.account_id
   connection_type = "ipsec.1"

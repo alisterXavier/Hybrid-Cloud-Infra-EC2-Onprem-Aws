@@ -1,10 +1,17 @@
+provider "aws" {
+  region     = "us-east-1"
+  access_key = ""
+  secret_key = ""
+}
+
+
 module "aws_vpc" {
   source               = "./vpc"
   vpc_cidr             = local.aws_vpc_cidr
   public_subnet        = local.aws_public_subnet
   private_subnet       = local.aws_private_subnets
   vpc_name             = "AWS"
-  private_subnet_count = 2
+  dns_hostname         = true
 }
 
 module "aws_instance" {
@@ -46,8 +53,8 @@ module "on_prem_vpc" {
   vpc_cidr             = local.on_prem_vpc_cidr
   public_subnet        = local.on_prem_public_subnet
   vpc_name             = "On-prem"
-  private_subnet_count = 1
   private_subnet       = local.on_prem_private_subnet
+  dns_hostname         = false
 }
 module "on_prem_instance" {
   source             = "./on-prem-instance"

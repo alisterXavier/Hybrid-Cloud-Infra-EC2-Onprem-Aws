@@ -5,7 +5,6 @@ variable "vpc_name" {
 variable "vpc_cidr" {
   type = string
 }
-
 variable "public_subnet" {
   type = object({
     cidr = string
@@ -18,7 +17,6 @@ variable "private_subnet" {
     az   = string
   }))
 }
-
-variable "private_subnet_count" {
-  type = number
+variable "dns_hostname" {
+  type = bool
 }

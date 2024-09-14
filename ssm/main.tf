@@ -2,7 +2,7 @@ resource "aws_ssm_document" "document" {
   name            = "Configure_CGW"
   document_type   = "Command"
   document_format = "YAML"
-  content = templatefile("Hybrid Cloud/ssm/libre.yaml", {
+  content = templatefile("/ssm/libre.yaml", {
     vpnConnectionId = var.vpnConnectionId
     vpcRegion       = var.vpcRegion
     onPremVpcCidr   = var.onPremVpcCidr
